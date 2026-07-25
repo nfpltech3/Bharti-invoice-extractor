@@ -337,7 +337,6 @@ class BhartiExtractorApp:
         style.configure("Treeview", font=("Segoe UI", 9), rowheight=25, background=BRAND_WHITE, fieldbackground=BRAND_WHITE)
         
         self.extracted_items = []
-        self.invoice_metadata = {}
         
         self._build_ui()
 
@@ -406,73 +405,80 @@ class BhartiExtractorApp:
         self.lbl_status.pack(side=tk.RIGHT, padx=10, pady=5)
 
     def _browse_file(self):
-        filepath = filedialog.askopenfilename(
-            title="Select Bharti PDF Invoice",
+        filepaths = filedialog.askopenfilenames(
+            title="Select Bharti PDF Invoices",
             filetypes=[("PDF Files", "*.pdf")]
         )
-        if filepath:
+        if filepaths:
             self.entry_path.delete(0, tk.END)
-            self.entry_path.insert(0, filepath)
+            self.entry_path.insert(0, " | ".join(filepaths))
 
     def _clear(self):
         self.entry_path.delete(0, tk.END)
         self.tree.delete(*self.tree.get_children())
         self.extracted_items = []
-        self.invoice_metadata = {}
         self.btn_export.config(state=tk.DISABLED)
         self.lbl_status.config(text="Ready", fg=BRAND_MUTED)
 
     def _extract(self):
-        filepath = self.entry_path.get().strip()
-        if not filepath or not os.path.exists(filepath):
-            messagebox.showerror("Error", "Please select a valid PDF file.")
+        filepaths_raw = self.entry_path.get().strip()
+        if not filepaths_raw:
+            messagebox.showerror("Error", "Please select at least one valid PDF file.")
+            return
+
+        filepaths = [fp.strip() for fp in filepaths_raw.split("|") if fp.strip() and os.path.exists(fp.strip())]
+        if not filepaths:
+            messagebox.showerror("Error", "No valid files found. Please re-select.")
             return
 
         self.tree.delete(*self.tree.get_children())
-        self.lbl_status.config(text="Extracting data... Please wait.", fg=BRAND_MUTED)
+        self.lbl_status.config(text=f"Extracting {len(filepaths)} files... Please wait.", fg=BRAND_MUTED)
         self.root.update()
 
-        try:
-            inv_no, doc_date, currency, items, format_detected = parse_bharti_invoice(filepath)
-            
-            if not items:
-                raise ValueError(f"No items could be extracted using the {format_detected} format.")
+        self.extracted_items = []
+        errors = []
+        success_count = 0
 
-            self.invoice_metadata = {
-                "Invoice No": inv_no,
-                "Invoice Date": doc_date,
-                "Currency": currency
-            }
-            
-            self.extracted_items = items
-            
-            for item in items:
-                coo = item.get("coo", "")
-                qty = item.get("qty", "")
-                uom = item.get("uom", "PCS")
-                unit_price = item.get("unit_price", "")
-                desc = item.get("desc", "")
-                part_no = item.get("part_no", "")
+        for filepath in filepaths:
+            try:
+                inv_no, doc_date, currency, items, format_detected = parse_bharti_invoice(filepath)
                 
-                self.tree.insert("", tk.END, values=(
-                    inv_no,
-                    doc_date,
-                    part_no,
-                    desc,
-                    qty,
-                    uom,
-                    currency,
-                    unit_price,
-                    coo
-                ))
+                if not items:
+                    raise ValueError(f"No items could be extracted using the {format_detected} format.")
+                
+                for item in items:
+                    item['Invoice No'] = inv_no
+                    item['Invoice Date'] = doc_date
+                    item['Currency'] = currency
+                    self.extracted_items.append(item)
+                    
+                    self.tree.insert("", tk.END, values=(
+                        inv_no,
+                        doc_date,
+                        item.get("part_no", ""),
+                        item.get("desc", ""),
+                        item.get("qty", ""),
+                        item.get("uom", "PCS"),
+                        currency,
+                        item.get("unit_price", ""),
+                        item.get("coo", "")
+                    ))
+                success_count += 1
+            except Exception as e:
+                filename = os.path.basename(filepath)
+                logger.exception(f"Extraction failed for {filename}")
+                errors.append(f"{filename}: {e}")
 
+        if success_count > 0:
             self.btn_export.config(state=tk.NORMAL)
-            self.lbl_status.config(text=f"Extracted {len(items)} items using {format_detected} format.", fg=BRAND_SUCCESS)
-            
-        except Exception as e:
-            logger.exception("Extraction failed")
-            messagebox.showerror("Error", f"Failed to extract data:\n{e}")
-            self.lbl_status.config(text="Extraction failed.", fg=BRAND_ACCENT)
+            status_text = f"Successfully extracted {len(self.extracted_items)} items from {success_count} files."
+            if errors:
+                status_text += f" ({len(errors)} files failed)."
+                messagebox.showwarning("Partial Success", "Some files failed to process:\n" + "\n".join(errors))
+            self.lbl_status.config(text=status_text, fg=BRAND_SUCCESS)
+        else:
+            messagebox.showerror("Error", "Failed to extract data from any of the selected files:\n" + "\n".join(errors))
+            self.lbl_status.config(text="Extraction failed completely.", fg=BRAND_ACCENT)
 
     def _export(self):
         if not self.extracted_items:
@@ -488,19 +494,16 @@ class BhartiExtractorApp:
 
         try:
             export_data = []
-            inv_no = self.invoice_metadata.get("Invoice No", "")
-            doc_date = self.invoice_metadata.get("Invoice Date", "")
-            currency = self.invoice_metadata.get("Currency", "USD")
 
             for item in self.extracted_items:
                 export_data.append({
-                    "Invoice No": inv_no,
-                    "Invoice Date": doc_date,
+                    "Invoice No": item.get("Invoice No", ""),
+                    "Invoice Date": item.get("Invoice Date", ""),
                     "Model": item.get("part_no", ""),
                     "Quantity": item.get("qty", ""),
                     "Unit Price": item.get("unit_price", ""),
                     "UOM": item.get("uom", "PCS"),
-                    "Currency": currency,
+                    "Currency": item.get("Currency", "USD"),
                     "Product Desc": item.get("desc", ""),
                     "Country of Origin": item.get("coo", "")
                 })
